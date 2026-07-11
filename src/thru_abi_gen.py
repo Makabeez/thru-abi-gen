@@ -193,15 +193,76 @@ def struct_to_abi(st: Struct) -> dict:
     }
 
 
-def build_instruction_envelope(root_name: str, variants: list) -> dict:
-    """variants: list of (tag_value:int, type_name:str, variant_name:str)."""
+def _pascal(word: str) -> str:
+    return word[:1].upper() + word[1:] if word else word
+
+
+def resolve_instruction_types(structs, variants, discriminator=None):
+    """
+    Decide how to model the discriminated instruction root so its wire layout
+    matches the program's real bytes.
+
+    Real Thru programs lead every instruction struct with the SAME discriminator
+    field (e.g. `uint instruction_type`), and that field IS the tag on the wire —
+    it is not a separate 1-byte value. So when every variant struct shares an
+    identical first field, we:
+      * set the envelope tag to that field's actual width (u32 for `uint`, etc.)
+      * strip it from each variant, emitting a `<Variant>Payload` remainder type
+    That yields `[tag][payload]` == the exact bytes the program reads.
+
+    If the variants do NOT share a common leading field (e.g. the docs' idealized
+    `InitializeArgs{seed}` / `IncrementArgs{amount}` shapes), we fall back to a
+    separate `u8` tag and reference the full variant structs unchanged.
+
+    Returns (tag_primitive, payload_types, consumed_names, variant_specs) where
+    variant_specs is a list of (tag_value, payload_type_name, variant_name).
+    """
+    by_name = {s.name: s for s in structs}
+    variant_structs = []
+    for tv, tname, vname in variants:
+        if tname not in by_name:
+            raise ValueError(f"--instructions references unknown type '{tname}'")
+        variant_structs.append((tv, by_name[tname], vname))
+
+    # do all variants share an identical leading field?
+    first_fields = [vs.fields[0] for _, vs, _ in variant_structs if vs.fields]
+    shared = None
+    if len(first_fields) == len(variant_structs) and first_fields:
+        f0 = first_fields[0]
+        want = discriminator or f0.name
+        if all(f.name == want and f.ctype == f0.ctype for f in first_fields):
+            shared = f0
+
+    if shared is None:
+        # fallback: separate u8 tag, full variant structs as payloads
+        specs = [(tv, vs.name, vn) for tv, vs, vn in variant_structs]
+        return "u8", [], set(), specs
+
+    tag_primitive = abi_primitive(shared.ctype)
+    payload_types, specs, consumed = [], [], set()
+    for tv, vs, vn in variant_structs:
+        consumed.add(vs.name)
+        payload_name = f"{_pascal(vn)}Payload"
+        payload_types.append({
+            "name": payload_name,
+            "kind": {"struct": {
+                "packed": True,
+                "fields": [field_to_abi(f) for f in vs.fields[1:]],  # drop discriminator
+            }},
+        })
+        specs.append((tv, payload_name, vn))
+    return tag_primitive, payload_types, consumed, specs
+
+
+def build_instruction_envelope(root_name: str, tag_primitive: str, variant_specs: list) -> dict:
+    """variant_specs: list of (tag_value:int, payload_type_name:str, variant_name:str)."""
     return {
         "name": root_name,
         "kind": {
             "struct": {
                 "packed": True,
                 "fields": [
-                    {"name": "tag", "field-type": {"primitive": "u8"}},
+                    {"name": "tag", "field-type": {"primitive": tag_primitive}},
                     {
                         "name": "payload",
                         "field-type": {
@@ -214,7 +275,7 @@ def build_instruction_envelope(root_name: str, variants: list) -> dict:
                                         "tag-value": tv,
                                         "variant-type": {"type-ref": {"name": tn}},
                                     }
-                                    for tv, tn, vn in variants
+                                    for tv, tn, vn in variant_specs
                                 ],
                             }
                         },
@@ -245,9 +306,20 @@ def build_abi(structs, args, variants):
     root_types["errors"] = errors  # may be None -> explorer treats as absent
     root_types["events"] = events
 
-    types = [struct_to_abi(s) for s in structs]
     if inst_root and variants:
-        types.insert(0, build_instruction_envelope(inst_root, variants))
+        tag_prim, payload_types, consumed, specs = resolve_instruction_types(
+            structs, variants, getattr(args, "discriminator", None)
+        )
+        # pass-through every struct except the ones folded into the envelope
+        types = [struct_to_abi(s) for s in structs if s.name not in consumed]
+        types = [build_instruction_envelope(inst_root, tag_prim, specs)] + payload_types + types
+        sys.stderr.write(
+            f"  instruction root: tag={tag_prim}"
+            + (f", stripped discriminator from {len(consumed)} variant(s)\n"
+               if consumed else " (separate tag; variants unchanged)\n")
+        )
+    else:
+        types = [struct_to_abi(s) for s in structs]
 
     abi = {
         "abi": {
@@ -352,6 +424,8 @@ def main(argv=None):
     p.add_argument("--description", default="Generated from C source by thru-abi-gen")
     p.add_argument("--instruction-root", help="name for the discriminated instruction envelope")
     p.add_argument("--instructions", help="tag map: '0=CreateArgs:create,1=IncArgs:increment'")
+    p.add_argument("--discriminator", help="name of the leading discriminator field to use "
+                                           "as the tag (default: infer the shared first field)")
     p.add_argument("--account-root", help="ABI type name that is the account root")
     p.add_argument("--events", help="ABI type name for emitted events")
     p.add_argument("--errors", help="ABI type name for the error enum")
