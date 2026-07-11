@@ -133,7 +133,8 @@ nothing.
 
 ## Scope & roadmap
 
-- ✅ packed structs, primitive widths, fixed arrays, `#define` sizes, annotations, discriminated instruction root
+- ✅ packed structs, primitive widths, fixed arrays, `#define` sizes, annotations
+- ✅ discriminated instruction root with the tag **width inferred from the program's own leading field** (`instruction_type`), and that field stripped from each payload — so instruction reflection decodes against the real wire bytes, not a hardcoded `u8` tag
 - 🔜 flexible-array members (runtime `field-ref` sizes, e.g. a `len` field followed by `data[len]`)
 - 🔜 nested `type-ref` across imported packages; `--emit c-check` to diff a compiled struct's `sizeof` against the ABI footprint
 

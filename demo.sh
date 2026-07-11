@@ -21,15 +21,19 @@ python3 - "$OUT" <<'PY'
 import sys, yaml
 d = yaml.safe_load(open(sys.argv[1]))
 rt = d["abi"]["options"]["program-metadata"]["root-types"]
-names = [t["name"] for t in d["types"]]
-seed = next(f for t in d["types"] if t["name"]=="TnCounterCreateArgs"
-            for f in t["kind"]["struct"]["fields"] if f["name"]=="counter_program_seed")
+types = {t["name"]: t for t in d["types"]}
+names = list(types)
+seed = next(f for f in types["CreatePayload"]["kind"]["struct"]["fields"]
+            if f["name"]=="counter_program_seed")
+tag = types["CounterInstruction"]["kind"]["struct"]["fields"][0]["field-type"]["primitive"]
 assert rt["instruction-root"] == "CounterInstruction"
 assert rt["account-root"] == "TnCounterAccount"
 assert seed["field-type"]["array"]["size"]["literal"]["u64"] == 32
+assert tag == "u32"   # discriminator width inferred from instruction_type, not hardcoded u8
 print("  types      :", ", ".join(names))
 print("  root-types :", {k:v for k,v in rt.items() if v})
 print("  seed[]     : u8 x 32  (TN_SEED_SIZE resolved from #define)")
+print("  tag        : u32       (inferred from instruction_type; matches real wire)")
 print("  OK")
 PY
 
