@@ -3,7 +3,7 @@ abi:
   name: Counter Program
   abi-version: 1
   package-version: 1.0.0
-  description: Explorer-compatible counter ABI (generated from C by thru-abi-gen)
+  description: Generated from C source by thru-abi-gen
   imports: []
   options:
     program-metadata:
@@ -11,7 +11,7 @@ abi:
         instruction-root: CounterInstruction
         account-root: TnCounterAccount
         errors: null
-        events: null
+        events: TnCounterEvent
 types:
 - name: CounterInstruction
   kind:
@@ -74,6 +74,14 @@ types:
         field-type:
           primitive: u16
 - name: TnCounterAccount
+  kind:
+    struct:
+      packed: true
+      fields:
+      - name: counter_value
+        field-type:
+          primitive: u64
+- name: TnCounterEvent
   kind:
     struct:
       packed: true

@@ -121,13 +121,15 @@ lives in [`examples/counter-program/`](./examples/counter-program/)):
 
 | | |
 | --- | --- |
-| Program account | `ta…<fill after deploy>` |
-| ABI account | `ta…<fill after deploy>` |
-| Increment tx (event decoded via this ABI) | `ts…<fill after deploy>` |
-| Explorer | [scan.thru.org](https://scan.thru.org) |
+| Program account | [`taLBRGzlvDoOBRPZlwQeMMizFrjWdYNw3Dnauw37N62dbm`](https://scan.thru.org/account/taLBRGzlvDoOBRPZlwQeMMizFrjWdYNw3Dnauw37N62dbm) |
+| ABI account | [`taun_rrfX3-S6UXGTserajhnYAgLY-cW5j3I8jyPN8p-wB`](https://scan.thru.org/account/taun_rrfX3-S6UXGTserajhnYAgLY-cW5j3I8jyPN8p-wB) |
+| Increment tx (event `0100000000000000` decoded via this ABI's `TnCounterEvent`) | [`ts3NObr…c4QQ60DiDM`](https://scan.thru.org/tx/ts3NObr__SFDZQ6PDR7R5BRySmpTtlJTon3k7mhOs8vO2AK1XYf6r8drA5abKpb-K6Osj5hCMxPTIyctc4QQ60DiDM) |
 
-Transaction fees on alphanet are currently 0, so the full deploy → publish → reflect
-loop costs nothing.
+The generated ABI was validated by Thru's own `thru abi analyze` (no layout or
+validation errors), published on-chain, read back byte-identical, and the emitted
+increment event decodes against the tool-generated `TnCounterEvent` type. Transaction
+fees on alphanet are currently 0, so the full deploy → publish → reflect loop costs
+nothing.
 
 ## Scope & roadmap
 

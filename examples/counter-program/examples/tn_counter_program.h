@@ -36,4 +36,10 @@ typedef struct __attribute__((packed)) {
     ulong counter_value;
 } tn_counter_account_t;
 
+// @abi:events
+/* Emitted on increment: the new counter value */
+typedef struct __attribute__((packed)) {
+    ulong counter_value;
+} tn_counter_event_t;
+
 #endif

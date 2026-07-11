@@ -2,3 +2,6 @@ __pycache__/
 *.pyc
 .venv/
 dist/
+
+# build artifacts
+examples/counter-program/build/
