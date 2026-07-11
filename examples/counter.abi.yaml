@@ -1,0 +1,83 @@
+abi:
+  package: thru.example.counter
+  name: Counter Program
+  abi-version: 1
+  package-version: 1.0.0
+  description: Explorer-compatible counter ABI (generated from C by thru-abi-gen)
+  imports: []
+  options:
+    program-metadata:
+      root-types:
+        instruction-root: CounterInstruction
+        account-root: TnCounterAccount
+        errors: null
+        events: null
+types:
+- name: CounterInstruction
+  kind:
+    struct:
+      packed: true
+      fields:
+      - name: tag
+        field-type:
+          primitive: u8
+      - name: payload
+        field-type:
+          enum:
+            packed: true
+            tag-ref:
+              field-ref:
+                path:
+                - tag
+            variants:
+            - name: create
+              tag-value: 0
+              variant-type:
+                type-ref:
+                  name: TnCounterCreateArgs
+            - name: increment
+              tag-value: 1
+              variant-type:
+                type-ref:
+                  name: TnCounterIncrementArgs
+- name: TnCounterCreateArgs
+  kind:
+    struct:
+      packed: true
+      fields:
+      - name: instruction_type
+        field-type:
+          primitive: u32
+      - name: account_index
+        field-type:
+          primitive: u16
+      - name: counter_program_seed
+        field-type:
+          array:
+            size:
+              literal:
+                u64: 32
+            element-type:
+              primitive: u8
+      - name: proof_size
+        field-type:
+          primitive: u32
+- name: TnCounterIncrementArgs
+  kind:
+    struct:
+      packed: true
+      fields:
+      - name: instruction_type
+        field-type:
+          primitive: u32
+      - name: account_index
+        field-type:
+          primitive: u16
+- name: TnCounterAccount
+  kind:
+    struct:
+      packed: true
+      fields:
+      - name: counter_value
+        field-type:
+          primitive: u64
