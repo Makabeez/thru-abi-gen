@@ -3,7 +3,7 @@ abi:
   name: Counter Program
   abi-version: 1
   package-version: 1.0.0
-  description: Generated from C source by thru-abi-gen
+  description: Explorer-compatible counter ABI (generated from C by thru-abi-gen)
   imports: []
   options:
     program-metadata:

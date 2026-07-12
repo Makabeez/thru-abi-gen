@@ -21,7 +21,7 @@ typedef struct __attribute__((packed)) {
     ushort account_index;
     uchar counter_program_seed[TN_SEED_SIZE];
     uint proof_size;
-    /* proof_data follows dynamically based on proof_size */
+    uchar proof_data[]; // @abi:len=proof_size  (flexible array member; sizeof stays 42)
 } tn_counter_create_args_t;
 
 /* Increment counter instruction arguments */

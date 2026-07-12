@@ -53,8 +53,10 @@ SDK_CONSTANTS = {"TN_SEED_SIZE": 32}
 class Field:
     name: str
     ctype: str
-    array_size: Optional[int] = None          # resolved element count, if array
+    array_size: Optional[int] = None          # resolved element count, if fixed array
     array_size_expr: Optional[str] = None     # original expr, for diagnostics
+    flexible: bool = False                     # trailing flexible array member (T name[])
+    len_ref: Optional[str] = None              # sibling field whose value sizes it
 
 
 @dataclass
@@ -73,11 +75,16 @@ STRUCT_RE = re.compile(
     r"(?P<body>.*?)\}\s*(?P<name>[A-Za-z_]\w*)\s*;",
     re.DOTALL,
 )
-# `type name` or `type name[SIZE]`  (type may be multi-word e.g. "unsigned char").
-# Applied per-statement (body is split on ';'), so it is line-layout independent.
+# `type name`, `type name[SIZE]`, or flexible `type name[]` / `type name[0]`.
+# (type may be multi-word e.g. "unsigned char"). Applied per-statement, so it is
+# line-layout independent. The size group is '*' so empty brackets are captured.
 FIELD_RE = re.compile(
     r"^\s*(?P<type>[A-Za-z_][\w\s]*?)\s+(?P<name>[A-Za-z_]\w*)"
-    r"\s*(?:\[\s*(?P<size>[A-Za-z_0-9]+)\s*\])?\s*$"
+    r"\s*(?P<brackets>\[\s*(?P<size>[A-Za-z_0-9]*)\s*\])?\s*$"
+)
+# a flexible array member with its length field: `uchar proof_data[]; // @abi:len=proof_size`
+FAM_LEN_RE = re.compile(
+    r"([A-Za-z_]\w*)\s*\[\s*0?\s*\]\s*;[^\n]*@abi:len=([A-Za-z_]\w*)"
 )
 # inline annotations: // @abi:instruction-root  // @abi:account-root
 #                     // @abi:events  // @abi:errors  // @abi:name=CreateArgs
@@ -133,6 +140,8 @@ def parse_header(source: str) -> tuple:
         for role in ("instruction-root", "account-root", "events", "errors"):
             if role in annots:
                 st.role = role
+        # map flexible-array field name -> its length field, from inline @abi:len
+        len_map = dict(FAM_LEN_RE.findall(m.group("body")))
         # strip // line comments, then treat each ';'-terminated statement as a field
         body = re.sub(r"//[^\n]*", "", m.group("body"))
         for stmt in body.split(";"):
@@ -143,17 +152,31 @@ def parse_header(source: str) -> tuple:
             if not fm:
                 continue
             ctype = " ".join(fm.group("type").split())
+            name = fm.group("name")
+            has_brackets = fm.group("brackets") is not None
             size_tok = fm.group("size")
             size_val, size_expr = None, None
-            if size_tok is not None:
+            flexible, len_ref = False, None
+
+            if has_brackets and (size_tok is None or size_tok == "" or size_tok == "0"):
+                # flexible array member: T name[]  or  T name[0]
+                flexible = True
+                len_ref = len_map.get(name)
+                if len_ref is None:
+                    raise ValueError(
+                        f"flexible array '{c_name}.{name}[]' has no length field. "
+                        f"Annotate it, e.g.  {ctype} {name}[]; // @abi:len=<field>"
+                    )
+            elif has_brackets:
+                # fixed array: literal or #define size
                 size_expr = size_tok
                 size_val = int(size_tok) if size_tok.isdigit() else consts.get(size_tok)
                 if size_val is None:
                     raise ValueError(
-                        f"array size '{size_tok}' in {c_name}.{fm.group('name')} "
+                        f"array size '{size_tok}' in {c_name}.{name} "
                         f"is not a literal or known #define"
                     )
-            st.fields.append(Field(fm.group("name"), ctype, size_val, size_expr))
+            st.fields.append(Field(name, ctype, size_val, size_expr, flexible, len_ref))
         structs.append(st)
     return structs, consts
 
@@ -169,7 +192,15 @@ def abi_primitive(ctype: str) -> str:
 
 def field_to_abi(f: Field) -> dict:
     prim = abi_primitive(f.ctype)
-    if f.array_size is not None:
+    if f.flexible:
+        # runtime-sized array: element count comes from a sibling field's value
+        ft = {
+            "array": {
+                "size": {"field-ref": {"path": [f.len_ref]}},
+                "element-type": {"primitive": prim},
+            }
+        }
+    elif f.array_size is not None:
         ft = {
             "array": {
                 "size": {"literal": {"u64": f.array_size}},
