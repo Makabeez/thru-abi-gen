@@ -68,6 +68,46 @@ an ABI only describes wire format, not the account-access model.
 Unmapped types (`size_t`, unknown typedefs) **fail loudly** rather than guessing a
 width — a wrong guess is worse than an error.
 
+## Dynamic payloads
+
+Fixed structs cover basic flows. Variable length shows up as soon as a program
+touches **proofs, signature batches, or metadata** — and those are three *different*
+decode problems, not one:
+
+| Shape | C | Annotation | Emits |
+| --- | --- | --- | --- |
+| Opaque blob | `uchar proof_data[];` | `// @abi:bytes=proof_size` | `u8` array, `field-ref` size |
+| Repeated struct | `tn_sig_t sigs[];` | `// @abi:count=sig_count` | `type-ref` element, `field-ref` size |
+| Text | `uchar label[];` | `// @abi:bytes=label_len` + `// @abi:text` | `char` array — reads as text, not hex |
+
+The distinction that matters is **what the length field counts**. An ABI `field-ref`
+size is used verbatim as an *element count*, so a field holding a **byte length** only
+works when elements are 1 byte wide. For a 96-byte signature, feeding a byte length
+into a `field-ref` over-reads by 96×, and the ABI still *looks* valid — it just
+decodes garbage. So the annotation has to say which:
+
+- `@abi:count=f` — `f` holds an element count. Used verbatim.
+- `@abi:bytes=f` — `f` holds a byte length. Accepted where elements are 1 byte;
+  **refused** otherwise, with a message telling you to store a count instead.
+- `@abi:len=f` — historical spelling. Still accepted on 1-byte elements (where the
+  two are identical); **refused as ambiguous** on wider ones.
+
+Refused rather than guessed, in the same spirit as unmapped types:
+
+```
+error: 'values[]' uses // @abi:len=data_bytes but each element is 4 bytes, so it is
+ambiguous whether 'data_bytes' holds an element count or a byte length -- and the two
+differ by 4x. Say which: // @abi:count=data_bytes  or  // @abi:bytes=data_bytes.
+```
+
+Layouts the wire format cannot express are rejected up front: a flexible member that
+isn't last, more than one per struct, a length field that doesn't exist, and nested
+variable-length data (a runtime-sized struct used as an array element — it has no
+static element size, so ABI v1 can't address it).
+
+Worked example covering all three: [`examples/dynamic-shapes.h`](./examples/dynamic-shapes.h)
+→ [`examples/dynamic-shapes.abi.yaml`](./examples/dynamic-shapes.abi.yaml).
+
 ## Usage
 
 ```bash
@@ -135,7 +175,10 @@ nothing.
 
 - ✅ packed structs, primitive widths, fixed arrays, `#define` sizes, annotations
 - ✅ discriminated instruction root with the tag **width inferred from the program's own leading field** (`instruction_type`), and that field stripped from each payload — so instruction reflection decodes against the real wire bytes, not a hardcoded `u8` tag
-- 🔜 flexible-array members (runtime `field-ref` sizes, e.g. a `len` field followed by `data[len]`)
+- ✅ flexible-array members — runtime `field-ref` sizes, with **element-count vs byte-length disambiguation** so a multi-byte element can't silently over-read
+- ✅ struct-typed elements (`type-ref`), fixed and runtime-sized — signature batches and other repeated records
+- ✅ `@abi:text` so metadata decodes as text instead of a hex run
+- ✅ layout guards: trailing/unique flexible member, length-field existence, nested variable-length rejection
 - 🔜 nested `type-ref` across imported packages; `--emit c-check` to diff a compiled struct's `sizeof` against the ABI footprint
 
 ## Local dev
@@ -143,7 +186,8 @@ nothing.
 ```bash
 git clone https://github.com/Makabeez/thru-abi-gen
 cd thru-abi-gen
-bash demo.sh
+bash demo.sh                            # end-to-end against the counter header
+python3 tests/test_dynamic_shapes.py    # 15 checks, no test framework needed
 ```
 
 Zero runtime dependencies (Python stdlib + a hand-rolled deterministic YAML emitter).

@@ -13,6 +13,14 @@ What it does:
   * parses `typedef struct __attribute__((packed)) { ... } name_t;`
   * maps C primitives -> Thru ABI primitives (little-endian, packed)
   * resolves fixed arrays, including sizes given as #define constants
+  * resolves runtime-sized members (`T name[]`) against a sibling length field,
+    distinguishing an element COUNT from a BYTE length -- an ABI field-ref is used
+    verbatim as a count, so a byte length on a multi-byte element over-reads by
+    sizeof(element). Ambiguous cases are refused, never guessed.
+  * supports struct-typed elements via `type-ref` (signature batches and friends)
+    and `@abi:text` so metadata decodes as text rather than a hex run
+  * rejects layouts the wire format cannot express (non-trailing or duplicate
+    flexible members, missing length fields, nested variable-length elements)
   * emits an explorer-compatible ABI: program-metadata.root-types + a single
     discriminated instruction envelope (the shape explorer reflection expects)
   * optional --check shells out to `thru abi analyze` to prove it resolves
@@ -57,6 +65,8 @@ class Field:
     array_size_expr: Optional[str] = None     # original expr, for diagnostics
     flexible: bool = False                     # trailing flexible array member (T name[])
     len_ref: Optional[str] = None              # sibling field whose value sizes it
+    len_kind: Optional[str] = None             # 'count' | 'bytes' — what len_ref counts
+    is_text: bool = False                      # render as text, not an opaque byte array
 
 
 @dataclass
@@ -82,10 +92,16 @@ FIELD_RE = re.compile(
     r"^\s*(?P<type>[A-Za-z_][\w\s]*?)\s+(?P<name>[A-Za-z_]\w*)"
     r"\s*(?P<brackets>\[\s*(?P<size>[A-Za-z_0-9]*)\s*\])?\s*$"
 )
-# a flexible array member with its length field: `uchar proof_data[]; // @abi:len=proof_size`
+# a flexible array member with its length field, e.g.
+#   uchar proof_data[];  // @abi:len=proof_size
+#   sig_t sigs[];        // @abi:count=sig_count
+#   uchar blob[];        // @abi:bytes=blob_len
+# `len` is accepted as the historical spelling of `count` (see resolve_len_kind).
 FAM_LEN_RE = re.compile(
-    r"([A-Za-z_]\w*)\s*\[\s*0?\s*\]\s*;[^\n]*@abi:len=([A-Za-z_]\w*)"
+    r"([A-Za-z_]\w*)\s*\[\s*0?\s*\]\s*;[^\n]*@abi:(len|count|bytes)=([A-Za-z_]\w*)"
 )
+# `// @abi:text` on a field marks a char/u8 array as human-readable text.
+FIELD_TEXT_RE = re.compile(r"([A-Za-z_]\w*)\s*\[[^\]]*\]\s*;[^\n]*@abi:text\b")
 # inline annotations: // @abi:instruction-root  // @abi:account-root
 #                     // @abi:events  // @abi:errors  // @abi:name=CreateArgs
 ANNOT_RE = re.compile(r"//\s*@abi:([a-zA-Z0-9\-]+)(?:=([A-Za-z_]\w*))?")
@@ -140,8 +156,9 @@ def parse_header(source: str) -> tuple:
         for role in ("instruction-root", "account-root", "events", "errors"):
             if role in annots:
                 st.role = role
-        # map flexible-array field name -> its length field, from inline @abi:len
-        len_map = dict(FAM_LEN_RE.findall(m.group("body")))
+        # map flexible-array field name -> (kind, length field), from inline @abi:*
+        len_map = {fn: (kind, ref) for fn, kind, ref in FAM_LEN_RE.findall(m.group("body"))}
+        text_fields = set(FIELD_TEXT_RE.findall(m.group("body")))
         # strip // line comments, then treat each ';'-terminated statement as a field
         body = re.sub(r"//[^\n]*", "", m.group("body"))
         for stmt in body.split(";"):
@@ -156,17 +173,18 @@ def parse_header(source: str) -> tuple:
             has_brackets = fm.group("brackets") is not None
             size_tok = fm.group("size")
             size_val, size_expr = None, None
-            flexible, len_ref = False, None
+            flexible, len_ref, len_kind = False, None, None
 
             if has_brackets and (size_tok is None or size_tok == "" or size_tok == "0"):
                 # flexible array member: T name[]  or  T name[0]
                 flexible = True
-                len_ref = len_map.get(name)
-                if len_ref is None:
+                entry = len_map.get(name)
+                if entry is None:
                     raise ValueError(
                         f"flexible array '{c_name}.{name}[]' has no length field. "
-                        f"Annotate it, e.g.  {ctype} {name}[]; // @abi:len=<field>"
+                        f"Annotate it, e.g.  {ctype} {name}[]; // @abi:count=<field>"
                     )
+                len_kind, len_ref = entry
             elif has_brackets:
                 # fixed array: literal or #define size
                 size_expr = size_tok
@@ -176,9 +194,43 @@ def parse_header(source: str) -> tuple:
                         f"array size '{size_tok}' in {c_name}.{name} "
                         f"is not a literal or known #define"
                     )
-            st.fields.append(Field(name, ctype, size_val, size_expr, flexible, len_ref))
+            st.fields.append(Field(
+                name, ctype, size_val, size_expr, flexible, len_ref, len_kind,
+                name in text_fields,
+            ))
+        validate_struct(st)
         structs.append(st)
     return structs, consts
+
+
+def validate_struct(st: Struct) -> None:
+    """Reject layouts the wire format cannot express, before we emit anything."""
+    names = {f.name for f in st.fields}
+    flex = [i for i, f in enumerate(st.fields) if f.flexible]
+    if len(flex) > 1:
+        offenders = ", ".join(st.fields[i].name for i in flex)
+        raise ValueError(
+            f"'{st.c_name}' has {len(flex)} flexible array members ({offenders}); "
+            "C allows at most one, and only a trailing one is decodable."
+        )
+    if flex and flex[0] != len(st.fields) - 1:
+        bad = st.fields[flex[0]].name
+        after = st.fields[flex[0] + 1].name
+        raise ValueError(
+            f"flexible array '{st.c_name}.{bad}[]' is followed by '{after}'. "
+            "A runtime-sized member must be the last field or the bytes after it "
+            "cannot be located."
+        )
+    for f in st.fields:
+        if f.len_ref and f.len_ref not in names:
+            raise ValueError(
+                f"'{st.c_name}.{f.name}[]' is sized by '{f.len_ref}', "
+                f"which is not a field of {st.c_name}."
+            )
+        if f.len_ref == f.name:
+            raise ValueError(
+                f"'{st.c_name}.{f.name}[]' cannot be sized by itself."
+            )
 
 
 # --- ABI model emission ----------------------------------------------------
@@ -190,25 +242,130 @@ def abi_primitive(ctype: str) -> str:
     return PRIMITIVES[ctype]
 
 
+# Wire size of each ABI primitive, used to tell an element COUNT from a BYTE length.
+PRIM_SIZE = {
+    "u8": 1, "i8": 1, "char": 1,
+    "u16": 2, "i16": 2,
+    "u32": 4, "i32": 4, "f32": 4,
+    "u64": 8, "i64": 8, "f64": 8,
+}
+
+# c_name -> Struct, populated per run so fields can reference other structs.
+TYPE_REGISTRY: dict = {}
+
+
+def register_types(structs) -> None:
+    TYPE_REGISTRY.clear()
+    for s in structs:
+        TYPE_REGISTRY[s.c_name] = s
+
+
+def element_type(f: Field) -> dict:
+    """ABI element type for a field: a primitive, or a reference to another struct."""
+    if f.is_text:
+        prim = PRIMITIVES.get(f.ctype)
+        if prim not in ("u8", "char", "i8"):
+            raise ValueError(
+                f"'{f.name}' is marked @abi:text but its element type is "
+                f"'{f.ctype}'. Text needs a 1-byte element (char / uchar)."
+            )
+        return {"primitive": "char"}
+    if f.ctype in PRIMITIVES:
+        return {"primitive": PRIMITIVES[f.ctype]}
+    if f.ctype in TYPE_REGISTRY:
+        return {"type-ref": {"name": TYPE_REGISTRY[f.ctype].name}}
+    raise ValueError(
+        f"unmapped C type '{f.ctype}' on field '{f.name}'. Use a stdint type, "
+        "add it to PRIMITIVES, or define it as a packed struct in this header."
+    )
+
+
+def element_size(f: Field, _seen=None) -> int:
+    """Static wire size of one element, or raise if it isn't statically known."""
+    if f.is_text or f.ctype in PRIMITIVES:
+        prim = "char" if f.is_text else PRIMITIVES[f.ctype]
+        if prim not in PRIM_SIZE:
+            raise ValueError(f"no known wire size for primitive '{prim}'")
+        return PRIM_SIZE[prim]
+    st = TYPE_REGISTRY.get(f.ctype)
+    if st is None:
+        raise ValueError(f"unmapped C type '{f.ctype}' on field '{f.name}'")
+    return struct_size(st, _seen or set())
+
+
+def struct_size(st: Struct, seen: set) -> int:
+    if st.c_name in seen:
+        raise ValueError(f"recursive struct '{st.c_name}' has no static size")
+    seen = seen | {st.c_name}
+    total = 0
+    for sub in st.fields:
+        if sub.flexible:
+            raise ValueError(
+                f"'{st.c_name}' ends in a runtime-sized member ('{sub.name}[]'), so it "
+                "has no fixed size and cannot be used as an array element. "
+                "Nested variable-length data is not expressible in ABI v1."
+            )
+        total += element_size(sub, seen) * (sub.array_size or 1)
+    return total
+
+
+def flexible_size_node(f: Field) -> dict:
+    """
+    Resolve the runtime array size to an ELEMENT COUNT, which is what the ABI's
+    `field-ref` size means. A length field that holds BYTES only coincides with a
+    count when elements are 1 byte wide -- for anything wider, emitting the raw
+    field-ref silently over-reads by sizeof(element). So: `count=` is taken at face
+    value, `bytes=` is accepted only where bytes == count, and the legacy bare
+    `len=` is refused on multi-byte elements rather than guessing.
+    """
+    size = element_size(f)
+    ref = {"field-ref": {"path": [f.len_ref]}}
+    kind = f.len_kind
+
+    if kind == "count":
+        return ref
+    if kind == "bytes":
+        if size == 1:
+            return ref
+        raise ValueError(
+            f"'{f.name}[]' is sized by '{f.len_ref}' in bytes, but each element is "
+            f"{size} bytes. ABI v1 field-refs are used verbatim as an element count "
+            f"and cannot divide by {size}. Either store an element count in the "
+            f"struct and use // @abi:count={f.len_ref}, or make the member a byte "
+            f"array (uchar {f.name}[]) and decode it client-side."
+        )
+    # legacy bare `len=`
+    if size == 1:
+        return ref  # count == bytes; unambiguous, keeps v0.2 headers working
+    raise ValueError(
+        f"'{f.name}[]' uses // @abi:len={f.len_ref} but each element is {size} bytes, "
+        f"so it is ambiguous whether '{f.len_ref}' holds an element count or a byte "
+        f"length -- and the two differ by {size}x. Say which: "
+        f"// @abi:count={f.len_ref}  or  // @abi:bytes={f.len_ref}."
+    )
+
+
 def field_to_abi(f: Field) -> dict:
-    prim = abi_primitive(f.ctype)
     if f.flexible:
-        # runtime-sized array: element count comes from a sibling field's value
         ft = {
             "array": {
-                "size": {"field-ref": {"path": [f.len_ref]}},
-                "element-type": {"primitive": prim},
+                "size": flexible_size_node(f),
+                "element-type": element_type(f),
             }
         }
     elif f.array_size is not None:
         ft = {
             "array": {
                 "size": {"literal": {"u64": f.array_size}},
-                "element-type": {"primitive": prim},
+                "element-type": element_type(f),
             }
         }
     else:
-        ft = {"primitive": prim}
+        if f.is_text:
+            raise ValueError(
+                f"'{f.name}' is marked @abi:text but is a single value, not an array."
+            )
+        ft = element_type(f)
     return {"name": f.name, "field-type": ft}
 
 
@@ -318,6 +475,7 @@ def build_instruction_envelope(root_name: str, tag_primitive: str, variant_specs
 
 
 def build_abi(structs, args, variants):
+    register_types(structs)
     root_types = {}
     # explicit flags win, else fall back to annotations
     inst_root = args.instruction_root
@@ -466,13 +624,16 @@ def main(argv=None):
     with open(args.header, "r", encoding="utf-8") as fh:
         source = fh.read()
 
-    structs, _ = parse_header(source)
-    if not structs:
-        print("no packed structs found in header", file=sys.stderr)
+    try:
+        structs, _ = parse_header(source)
+        if not structs:
+            print("no packed structs found in header", file=sys.stderr)
+            return 2
+        variants = parse_variants(args.instructions)
+        abi = build_abi(structs, args, variants)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
         return 2
-
-    variants = parse_variants(args.instructions)
-    abi = build_abi(structs, args, variants)
     text = emit_yaml(abi) + "\n"
 
     if args.out:

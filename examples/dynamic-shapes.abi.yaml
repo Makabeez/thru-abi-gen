@@ -1,0 +1,143 @@
+abi:
+  package: thru.example.attest
+  name: Attestation Registry
+  abi-version: 1
+  package-version: 1.0.0
+  description: Generated from C source by thru-abi-gen
+  imports: []
+  options:
+    program-metadata:
+      root-types:
+        instruction-root: AttestInstruction
+        errors: null
+        events: null
+types:
+- name: AttestInstruction
+  kind:
+    struct:
+      packed: true
+      fields:
+      - name: tag
+        field-type:
+          primitive: u32
+      - name: payload
+        field-type:
+          enum:
+            packed: true
+            tag-ref:
+              field-ref:
+                path:
+                - tag
+            variants:
+            - name: submit
+              tag-value: 0
+              variant-type:
+                type-ref:
+                  name: SubmitPayload
+            - name: batch
+              tag-value: 1
+              variant-type:
+                type-ref:
+                  name: BatchPayload
+            - name: label
+              tag-value: 2
+              variant-type:
+                type-ref:
+                  name: LabelPayload
+- name: SubmitPayload
+  kind:
+    struct:
+      packed: true
+      fields:
+      - name: proof_size
+        field-type:
+          primitive: u32
+      - name: proof_data
+        field-type:
+          array:
+            size:
+              field-ref:
+                path:
+                - proof_size
+            element-type:
+              primitive: u8
+- name: BatchPayload
+  kind:
+    struct:
+      packed: true
+      fields:
+      - name: sig_count
+        field-type:
+          primitive: u32
+      - name: signatures
+        field-type:
+          array:
+            size:
+              field-ref:
+                path:
+                - sig_count
+            element-type:
+              type-ref:
+                name: TnAttestation
+- name: LabelPayload
+  kind:
+    struct:
+      packed: true
+      fields:
+      - name: label_len
+        field-type:
+          primitive: u32
+      - name: label
+        field-type:
+          array:
+            size:
+              field-ref:
+                path:
+                - label_len
+            element-type:
+              primitive: char
+- name: TnAttestation
+  kind:
+    struct:
+      packed: true
+      fields:
+      - name: signer
+        field-type:
+          array:
+            size:
+              literal:
+                u64: 32
+            element-type:
+              primitive: u8
+      - name: r
+        field-type:
+          array:
+            size:
+              literal:
+                u64: 32
+            element-type:
+              primitive: u8
+      - name: s
+        field-type:
+          array:
+            size:
+              literal:
+                u64: 32
+            element-type:
+              primitive: u8
+- name: TnAttestAccount
+  kind:
+    struct:
+      packed: true
+      fields:
+      - name: attestation_count
+        field-type:
+          primitive: u64
+      - name: authority
+        field-type:
+          array:
+            size:
+              literal:
+                u64: 32
+            element-type:
+              primitive: u8
